@@ -28,6 +28,9 @@
 #include <migraphx/functional.hpp>
 #include <migraphx/simple_par_for.hpp>
 #include <migraphx/env.hpp>
+#include <migraphx/make_op.hpp>
+#include <cstring>
+#include <numeric>
 #include <thread>
 #include <unordered_set>
 
@@ -45,6 +48,17 @@ static bool skip_propagate(instruction_ref ins)
     auto&& s = ins->get_shape();
     if(s.broadcasted() and s.element_space() < s.elements())
         return true;
+    // Do not fold an op that only expands small (e.g. broadcast) inputs, such as
+    // convert(multibroadcast(bias)): the literal would be activation-sized
+    // (hundreds of MB each) and is cheap to recompute inside the fused kernel.
+    if(not ins->inputs().empty() and s.elements() > 1024 * 1024)
+    {
+        std::size_t input_space = 0;
+        for(auto input : ins->inputs())
+            input_space += input->get_shape().element_space();
+        if(s.elements() > 2 * input_space)
+            return true;
+    }
     auto aliases = instruction::get_output_alias(ins, true);
     if(aliases.size() == 1 and aliases.front() != ins)
         return skip_propagate(aliases.front());
@@ -67,6 +81,51 @@ static literal as_packed(const argument& c)
     literal result;
     c.visit([&](auto x) { result = literal{s, x.begin(), x.end()}; });
     return result;
+}
+
+// A folded constant can be a broadcast in disguise, e.g. dot(broadcast(beta), W) after
+// simplify_algebra distributes a LayerNorm bias over a GEMM: every row is identical.
+// Keep one slice along each axis whose slices are all equal, so the literal stays
+// small and is re-broadcast instead of storing hundreds of MB per instance.
+static literal compress_repeated_axes(const literal& lit)
+{
+    const auto& s = lit.get_shape();
+    if(not s.standard() or s.bytes() < 16 * 1024 * 1024)
+        return lit;
+    auto lens             = s.lens();
+    const std::size_t esz = s.type_size();
+    std::vector<char> data(lit.data(), lit.data() + s.bytes());
+    bool changed = false;
+    for(std::size_t d = 0; d < lens.size(); d++)
+    {
+        if(lens[d] < 2)
+            continue;
+        std::size_t outer = std::accumulate(
+            lens.begin(), lens.begin() + d, std::size_t{1}, std::multiplies<>{});
+        std::size_t inner = std::accumulate(lens.begin() + d + 1,
+                                            lens.end(),
+                                            std::size_t{1},
+                                            std::multiplies<>{}) *
+                            esz;
+        bool same = true;
+        for(std::size_t o = 0; o < outer and same; o++)
+        {
+            const char* base = data.data() + o * lens[d] * inner;
+            for(std::size_t k = 1; k < lens[d] and same; k++)
+                same = std::memcmp(base, base + k * inner, inner) == 0;
+        }
+        if(not same)
+            continue;
+        std::vector<char> next(outer * inner);
+        for(std::size_t o = 0; o < outer; o++)
+            std::memcpy(next.data() + o * inner, data.data() + o * lens[d] * inner, inner);
+        data.swap(next);
+        lens[d] = 1;
+        changed = true;
+    }
+    if(not changed)
+        return lit;
+    return literal{shape{s.type(), lens}, data.data()};
 }
 
 void propagate_constant::apply(module& m) const
@@ -133,7 +192,12 @@ void propagate_constant::apply(module& m) const
             }
             assert(literals[i].get_shape().lens() == const_instrs_vec[i]->get_shape().lens());
             assert(literals[i].get_shape().bytes() <= const_instrs_vec[i]->get_shape().bytes());
-            auto l = m.add_literal(literals[i]);
+            auto lens = literals[i].get_shape().lens();
+            auto small = compress_repeated_axes(literals[i]);
+            auto l     = m.add_literal(small);
+            if(small.get_shape().lens() != lens)
+                l = m.insert_instruction(
+                    std::next(l), make_op("multibroadcast", {{"out_lens", lens}}), l);
             m.replace_instruction(const_instrs_vec[i], l);
         }
     }
