@@ -341,6 +341,13 @@ struct find_attention
         auto gemm1         = r.instructions["dot1"];
         auto softmax_input = r.instructions["x"];
 
+        // The fused attention kernel keeps a full head-dim slice per tile, so a huge
+        // reduction dim (e.g. channel attention that reduces over all spatial tokens,
+        // K = H*W) explodes kernel size and compile time. Leave such patterns unfused.
+        constexpr std::size_t max_head_dim = 256;
+        if(gemm1->inputs().front()->get_shape().lens().back() > max_head_dim)
+            return;
+
         // Capture all instructions part of the attention op
         auto attn_inss = get_attn_instructions(mpm.get_module(), gemm1, gemm2);
 
