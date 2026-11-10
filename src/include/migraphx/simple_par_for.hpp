@@ -29,10 +29,76 @@
 #include <algorithm>
 #include <vector>
 #include <cassert>
+#include <functional>
+#include <system_error>
+#include <migraphx/export.h>
 
 namespace migraphx {
 inline namespace MIGRAPHX_INLINE_NS {
 
+// On Windows, std::thread uses a 1 MB stack by default.  MIGraphX compile
+// passes contain recursive DFS traversals (fix() combinator) over deep model
+// graphs (ViT / InfiniDepth).  At 512-px resolution these exhaust the 1 MB
+// stack causing 0xC00000FD.  Thread creation lives in src/par_for.cpp (a
+// header self-include test forbids windows.h in public headers).
+#ifdef _WIN32
+namespace detail {
+MIGRAPHX_EXPORT void* create_thread_64mb(void* callable);
+MIGRAPHX_EXPORT void join_thread(void* handle);
+} // namespace detail
+
+struct joinable_thread
+{
+    void* handle = nullptr;
+    std::function<void()> fn;
+
+    joinable_thread() = default;
+
+    template <class F>
+    joinable_thread(F&& f) : fn(std::forward<F>(f)) // NOLINT
+    {
+        auto* p = new std::function<void()>(fn);
+        handle  = detail::create_thread_64mb(static_cast<void*>(p));
+        if(handle == nullptr)
+        {
+            delete p;
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again),
+                                    "create_thread_64mb failed");
+        }
+    }
+
+    joinable_thread& operator=(joinable_thread&& other) noexcept
+    {
+        if(this != &other)
+        {
+            handle = other.handle;
+            other.handle = nullptr;
+            fn = std::move(other.fn);
+        }
+        return *this;
+    }
+    joinable_thread(joinable_thread&& other) noexcept
+        : handle(other.handle), fn(std::move(other.fn))
+    {
+        other.handle = nullptr;
+    }
+    joinable_thread(const joinable_thread&) = delete;
+    joinable_thread& operator=(const joinable_thread&) = delete;
+
+    bool joinable() const noexcept { return handle != nullptr; }
+
+    void join()
+    {
+        if(handle != nullptr)
+        {
+            detail::join_thread(handle);
+            handle = nullptr;
+        }
+    }
+
+    ~joinable_thread() { join(); }
+};
+#else
 struct joinable_thread : std::thread
 {
     template <class... Xs>
@@ -49,6 +115,7 @@ struct joinable_thread : std::thread
             this->join();
     }
 };
+#endif
 
 template <class F>
 auto thread_invoke(std::size_t i, std::size_t tid, F f) -> decltype(f(i, tid))
@@ -67,8 +134,19 @@ void simple_par_for_impl(std::size_t n, std::size_t threadsize, F f)
 {
     if(threadsize <= 1)
     {
+#ifdef _WIN32
+        // On Windows the current-thread stack may only be 1 MB (Python default).
+        // Run the serial loop on a 64 MB joinable_thread to prevent 0xC00000FD
+        // from deep recursive graph passes in MIGraphX compile.
+        joinable_thread t([&] {
+            for(std::size_t i = 0; i < n; i++)
+                thread_invoke(i, 0, f);
+        });
+        t.join();
+#else
         for(std::size_t i = 0; i < n; i++)
             thread_invoke(i, 0, f);
+#endif
     }
     else
     {

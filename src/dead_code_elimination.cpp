@@ -55,16 +55,22 @@ void dead_code_elimination::apply(module& m) const
            not contains({"identity", "allocate"}, i->name()))
             continue;
         assert(std::distance(m.begin(), i) <= std::distance(m.begin(), last));
+        // Iterative BFS/queue replacement for the original recursive fix() DFS.
+        // Deep dead-code chains on large models (InfiniDepth, ViT) overflow the
+        // call stack via the recursive fix() combinator on Windows (1 MB default).
         std::unordered_set<instruction_ref> visited;
-        fix([&](auto self, auto leaf) {
-            if(not m.has_instruction(leaf))
-                return;
+        std::vector<instruction_ref> work_queue = {i};
+        while(not work_queue.empty())
+        {
+            auto leaf = work_queue.back();
+            work_queue.pop_back();
 
+            if(not m.has_instruction(leaf))
+                continue;
             if(leaf->outputs().empty())
             {
-                // Dont visit inputs twice
                 if(not visited.insert(leaf).second)
-                    return;
+                    continue;
                 std::unordered_set<instruction_ref> args(leaf->inputs().begin(),
                                                          leaf->inputs().end());
                 leaf->clear_arguments();
@@ -73,9 +79,9 @@ void dead_code_elimination::apply(module& m) const
                 if(leaf->name() != "@param" and leaf->name() != "@comment")
                     m.move_instruction(leaf, m.end());
                 for(auto arg : args)
-                    self(arg);
+                    work_queue.push_back(arg);
             }
-        })(i);
+        }
     }
     m.remove_instructions(std::next(last), m.end());
 }

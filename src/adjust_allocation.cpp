@@ -28,24 +28,37 @@
 #include <migraphx/iterator_for.hpp>
 #include <migraphx/ranges.hpp>
 #include <migraphx/logger.hpp>
+#include <unordered_set>
 
 namespace migraphx {
 inline namespace MIGRAPHX_INLINE_NS {
 
+// Iterative version of the original recursive get_allocation to prevent stack
+// overflow when the alias chain is long or contains a cycle (e.g. fused_concat
+// with resize ops produces chains that exceed Windows default stack depth).
 static instruction_ref get_allocation(instruction_ref ins)
 {
-    auto aliases = instruction::get_output_alias(ins, true);
-    if(aliases.size() != 1)
-        return ins;
-    auto alias_ins = aliases.front();
-    if(alias_ins == ins)
-        return ins;
-    if(alias_ins->outputs().size() > 1)
-        return ins;
-    if(alias_ins->inputs().size() == 1 and
-       alias_ins->get_shape() == alias_ins->inputs().front()->get_shape())
-        return get_allocation(alias_ins);
-    return alias_ins;
+    std::unordered_set<instruction_ref> visited;
+    while(true)
+    {
+        if(not visited.insert(ins).second)
+            return ins; // cycle detected
+        auto aliases = instruction::get_output_alias(ins, true);
+        if(aliases.size() != 1)
+            return ins;
+        auto alias_ins = aliases.front();
+        if(alias_ins == ins)
+            return ins;
+        if(alias_ins->outputs().size() > 1)
+            return ins;
+        if(alias_ins->inputs().size() == 1 and
+           alias_ins->get_shape() == alias_ins->inputs().front()->get_shape())
+        {
+            ins = alias_ins; // iterate instead of recurse
+            continue;
+        }
+        return alias_ins;
+    }
 }
 
 void adjust_allocation::apply(module& m) const

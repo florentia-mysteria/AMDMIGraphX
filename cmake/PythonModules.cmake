@@ -128,7 +128,7 @@ if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
     foreach(_found_python ${_found_pythons})
         string(STRIP "${_found_python}" _found_python)
         # Ignore virtual environments
-        if(NOT _found_python MATCHES "^\\*[ \t]*")
+        if(NOT _found_python MATCHES "^\\*[ \t]*" AND _found_python MATCHES "^-V:[0-9]")
             string(REGEX REPLACE "^-V:([0-9]*\\.[0-9]*t?)[ \\t]*\\*?[ \\t]*" "\\1;" _tuple ${_found_python})
             list(GET _tuple 0 _version)
             # Ignore if the Python version is disabled

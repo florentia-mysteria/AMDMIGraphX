@@ -38,6 +38,7 @@
 #include <bitset>
 #include <queue>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace migraphx {
 inline namespace MIGRAPHX_INLINE_NS {
@@ -537,24 +538,49 @@ void instruction::debug_print() const
     std::cout << std::endl;
 }
 
+// Non-recursive BFS implementation to prevent stack overflow on deep or cyclic
+// alias chains (e.g. fused_concat + resize nodes in InfiniDepth-style models).
 std::vector<instruction_ref> instruction::get_output_alias(instruction_ref ins, bool shallow)
 {
     auto alias_indices = ins->get_operator().output_alias(to_shapes(ins->inputs()));
     if(alias_indices.empty())
         return {ins};
-    std::vector<instruction_ref> result;
-    for(auto i : alias_indices)
+
+    if(shallow)
     {
-        if(shallow)
-        {
+        std::vector<instruction_ref> result;
+        for(auto i : alias_indices)
             result.push_back(ins->inputs().at(i));
+        return result;
+    }
+
+    // BFS over the alias graph; visited set prevents infinite loops on cycles.
+    std::vector<instruction_ref> result;
+    std::unordered_set<instruction_ref> visited;
+    std::queue<instruction_ref> work;
+    for(auto i : alias_indices)
+        work.push(ins->inputs().at(i));
+
+    while(not work.empty())
+    {
+        auto cur = work.front();
+        work.pop();
+        if(not visited.insert(cur).second)
+            continue; // already processed, skip
+
+        auto cur_indices = cur->get_operator().output_alias(to_shapes(cur->inputs()));
+        if(cur_indices.empty())
+        {
+            result.push_back(cur);
         }
         else
         {
-            auto nested = get_output_alias(ins->inputs().at(i));
-            result.insert(result.end(), nested.begin(), nested.end());
+            for(auto j : cur_indices)
+                work.push(cur->inputs().at(j));
         }
     }
+    if(result.empty())
+        result.push_back(ins);
     return result;
 }
 

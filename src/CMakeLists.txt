@@ -108,6 +108,7 @@ add_library(migraphx
     optimize_module.cpp
     pad_calc.cpp
     param_utils.cpp
+    par_for.cpp
     pass.cpp
     pass_manager.cpp
     permutation.cpp
@@ -347,6 +348,13 @@ rocm_install_targets(
     ${CMAKE_CURRENT_SOURCE_DIR}/op/builder/include
 )
 target_link_libraries(migraphx PUBLIC migraphx_version)
+
+# On Windows the default thread stack is 1 MB, which is insufficient for the
+# recursive graph passes (fix()-based DFS over deep ViT/InfiniDepth models).
+# Raise to 64 MB so compile passes do not stack-overflow (0xC00000FD).
+if(WIN32)
+    target_link_options(migraphx PUBLIC "/STACK:67108864")
+endif()
 
 if(NOT WIN32)
     check_cxx_linker_flag(-lstdc++fs HAS_LIB_STD_FILESYSTEM)

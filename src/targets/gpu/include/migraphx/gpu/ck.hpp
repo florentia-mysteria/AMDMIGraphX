@@ -38,12 +38,10 @@ namespace migraphx {
 inline namespace MIGRAPHX_INLINE_NS {
 namespace gpu {
 
-#ifndef _WIN32
 MIGRAPHX_DECLARE_ENV_VAR(MIGRAPHX_ENABLE_CK);
 MIGRAPHX_DECLARE_ENV_VAR(MIGRAPHX_LOG_CK_GEMM);
 MIGRAPHX_DECLARE_ENV_VAR(MIGRAPHX_CK_DEBUG);
 MIGRAPHX_DECLARE_ENV_VAR(MIGRAPHX_TUNE_CK);
-#endif
 
 // NOLINTNEXTLINE
 const char* const disable_warning_pragma = R"__migraphx__(

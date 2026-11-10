@@ -1873,26 +1873,53 @@ module& module::sort()
     copy_if(iterator_for(*this), std::back_inserter(lasts), [&](auto last) {
         return last->outputs().empty();
     });
+    // Iterative post-order DFS to avoid stack overflow on deep graphs.
+    // The original recursive fix()-based DFS could overflow when InfiniDepth /
+    // ViT-like models produce dependency chains of several hundred instructions.
+    // Each stack frame below stores (instruction, index into its child list) so
+    // we can resume after visiting each child, preserving post-order semantics.
     for(auto last : lasts)
     {
-        fix([&](auto self, auto ins) {
-            if(visited.insert(ins).second == false)
-                return;
-            auto ins_inputs = ins->inputs();
-            if(implicit_deps.find(ins) != implicit_deps.end())
+        // Each entry: {instruction, next-child-index-to-visit}
+        std::vector<std::pair<instruction_ref, std::size_t>> stk;
+        if(visited.count(last) == 0)
+            stk.emplace_back(last, 0);
+
+        while(not stk.empty())
+        {
+            auto& [ins, idx] = stk.back();
+
+            if(idx == 0 and visited.insert(ins).second == false)
             {
-                auto ins_implict_inputs = implicit_deps.at(ins);
-                ins_inputs.insert(
-                    ins_inputs.end(), ins_implict_inputs.begin(), ins_implict_inputs.end());
+                stk.pop_back();
+                continue;
             }
-            for(auto child : ins_inputs)
+
+            // Build the full child list once (inputs + implicit deps).
+            std::vector<instruction_ref> children = ins->inputs();
+            auto it = implicit_deps.find(ins);
+            if(it != implicit_deps.end())
+                children.insert(children.end(), it->second.begin(), it->second.end());
+
+            // Advance past children that are not in this module or already visited.
+            while(idx < children.size())
             {
+                auto child = children[idx];
+                ++idx;
                 if(not contains(this->impl->instructions, child))
                     continue;
-                self(child);
+                if(visited.count(child) == 0)
+                {
+                    // Push child; we'll come back to finish ins afterwards.
+                    stk.emplace_back(child, 0);
+                    goto next_iteration;
+                }
             }
+            // All children visited: place ins in topological order.
             this->move_instruction(ins, this->end());
-        })(last);
+            stk.pop_back();
+            next_iteration:;
+        }
     }
     assert(this->validate() == this->end());
     return *this;
